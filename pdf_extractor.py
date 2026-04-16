@@ -1,0 +1,78 @@
+import logging
+import subprocess
+import tempfile
+from pathlib import Path
+
+import pdfplumber
+
+logger = logging.getLogger(__name__)
+
+
+def extract_text_from_single_pdf(pdf_path: Path) -> str:
+    """从单个PDF提取文本。文本型PDF直接提取，图片型PDF走OCR兜底。"""
+    pdf_path = Path(pdf_path)
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"{pdf_path} 不存在")
+
+    # 1. 尝试文本型PDF
+    text_pages = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                text_pages.append(text)
+
+    if text_pages:
+        logger.info("文本型PDF，直接提取成功: %s", pdf_path.name)
+        return "\n\n".join(text_pages)
+
+    # 2. 图片型PDF，OCR兜底
+    logger.info("检测到图片型PDF，启用OCR: %s", pdf_path.name)
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        cmd = [
+            "ocrmypdf",
+            "-l", "chi_sim",
+            "--rotate-pages",
+            "--deskew",
+            "--clean",
+            str(pdf_path),
+            tmp_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.error("OCR处理失败: %s", result.stderr)
+            return ""
+
+        with pdfplumber.open(tmp_path) as pdf:
+            ocr_pages = []
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    ocr_pages.append(text)
+            return "\n\n".join(ocr_pages)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def extract_all_pdfs(folder_path: Path) -> dict[str, str]:
+    """遍历文件夹中所有PDF，返回 {文件名: 提取文本} 的字典。"""
+    folder_path = Path(folder_path)
+    if not folder_path.exists():
+        raise FileNotFoundError(f"文件夹不存在: {folder_path}")
+
+    results = {}
+    pdf_files = sorted(folder_path.glob("*.pdf"))
+
+    if not pdf_files:
+        logger.warning("文件夹中没有PDF文件: %s", folder_path)
+        return results
+
+    for pdf_file in pdf_files:
+        logger.info("正在处理: %s", pdf_file.name)
+        text = extract_text_from_single_pdf(pdf_file)
+        results[pdf_file.name] = text
+
+    return results
