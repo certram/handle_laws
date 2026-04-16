@@ -80,10 +80,16 @@ api:
 
 naming:
   civil_first: "26民初"
+
+delete:
+  - "支付宝"
+  - "财付通"
+  - "银行"
 ```
 
 - `api_key`：DashScope API密钥
 - `civil_first`：保全卷和裁定书文件名的前缀，如 `26民初13074保全卷.docx`
+- `delete`：`delete_docs.py` 默认删除的协助执行通知书类型，支持的关键词：支付宝、财付通、银行、房产、股权、车辆。命令行参数可覆盖此配置
 
 API Key 获取方式：登录 [阿里云DashScope控制台](https://dashscope.console.aliyun.com/) 创建。
 
@@ -158,6 +164,9 @@ python main.py --new
 ```bash
 python main.py -f                              # 强制重新处理所有案件
 python main.py -f /path/to/specific/case       # 强制重新处理指定案件
+#如下举具体例子：
+python3 main.py -f "original_files/（2026）粤0305民初12038号-20260323"
+# 上述命令含义：针对（2026）粤0305民初12038号-20260323这个案件，会重新走完完整流程（PDF → AI → YAML → Word）
 ```
 
 ### 从已有 YAML 重新生成文书
@@ -182,6 +191,7 @@ python main.py -c "案件目录名"                  # 只清理指定案件的 
 只生成外勤类协助执行通知书，跳过鹰眼类和支付宝。裁定书和保全卷不受影响，照常生成。
 
 跳过规则：
+
 - **鹰眼类**：23家鹰眼银行账户、深圳市内房产/股权/车辆 → 跳过
 - **支付宝** → 跳过
 - **财付通、外勤银行、深圳市外房产/股权/车辆** → 正常生成
