@@ -3,7 +3,7 @@ import json
 import logging
 import shutil
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
@@ -58,7 +58,7 @@ def _save_processed(processed: dict[str, str]):
 def _mark_processed(case_name: str):
     """将一个案件目录名标记为已处理。"""
     processed = _load_processed()
-    processed[case_name] = date.today().isoformat()
+    processed[case_name] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     _save_processed(processed)
 
 
@@ -201,7 +201,9 @@ def process_all_cases(input_dir: Path, output_dir: Path, only_new: bool = False,
                 logger.error("案件 %s 处理失败: %s", case_name, e)
                 continue
     else:
-        process_case(input_dir, output_dir, force=force, civil=civil)
+        # 单案件目录（无子文件夹），输出到 output_dir/案件名/ 下
+        case_output = output_dir / input_dir.name
+        process_case(input_dir, case_output, force=force, civil=civil)
         return
 
     logger.info(
@@ -214,6 +216,44 @@ def process_all_cases(input_dir: Path, output_dir: Path, only_new: bool = False,
         "  ##   ##      ##  ##     \n"
         "   ####       ###    ###\n"
     )
+
+
+def _regenerate_selected(output_dir: Path, case_numbers: list[str], civil: bool = False):
+    """
+    根据案号数字列表，从 outputs/ 中正则匹配对应目录，从YAML重新生成docx。
+
+    case_numbers 如 ["12038", "13324"]，会匹配 outputs/ 下包含 "民初12038号" 的目录。
+    """
+    import re
+
+    if not output_dir.exists():
+        logger.error("outputs/ 目录不存在")
+        return
+
+    subdirs = sorted([d for d in output_dir.iterdir() if d.is_dir()])
+    if not subdirs:
+        logger.warning("outputs/ 下没有案件目录")
+        return
+
+    for num in case_numbers:
+        # 用 "民初{num}号" 精确匹配，避免误匹配日期或其他数字
+        pattern = re.compile(rf"民初{re.escape(num)}号")
+        matched = [d for d in subdirs if pattern.search(d.name)]
+
+        if not matched:
+            logger.warning("案号 %s 未匹配到任何目录", num)
+            continue
+
+        if len(matched) > 1:
+            logger.warning("案号 %s 匹配到多个目录，跳过: %s", num, [d.name for d in matched])
+            continue
+
+        case_dir = matched[0]
+        logger.info("案号 %s → %s", num, case_dir.name)
+        try:
+            _regenerate_from_yaml(case_dir, civil=civil)
+        except Exception as e:
+            logger.error("案件 %s 重新生成失败: %s", case_dir.name, e)
 
 
 def _regenerate_from_yaml(output_folder: Path, civil: bool = False):
@@ -270,6 +310,7 @@ def main():
     parser.add_argument("--clean", "-c", action="store_true", help="清理旧docx文件后重新生成")
     parser.add_argument("--civil", action="store_true", help="民事模式：只生成外勤类协助执行通知书（跳过鹰眼和支付宝）")
     parser.add_argument("--reset", "-r", action="store_true", help="重置：清空outputs/和original_files/下所有子目录及文件")
+    parser.add_argument("--regen", action="store_true", help="从 regenerate.json 读取案号列表，从YAML重新生成docx")
     args = parser.parse_args()
 
     project_root = Path(__file__).parent
@@ -291,6 +332,26 @@ def main():
             PROCESSED_FILE.unlink()
             logger.info("已删除: %s", PROCESSED_FILE.name)
         logger.info("重置完成")
+        return
+
+    # regen 模式：从 regenerate.json 读取案号，批量从YAML重新生成docx
+    if args.regen:
+        regen_file = project_root / "regenerate.json"
+        if not regen_file.exists():
+            logger.error("文件不存在: %s", regen_file)
+            return
+
+        with open(regen_file, "r", encoding="utf-8") as f:
+            case_numbers = json.load(f)
+
+        if not isinstance(case_numbers, list) or not case_numbers:
+            logger.error("regenerate.json 格式错误，应为非空数组，如 [12038, 13324]")
+            return
+
+        case_numbers = [str(n) for n in case_numbers]
+
+        logger.info("读取到 %d 个案号: %s", len(case_numbers), case_numbers)
+        _regenerate_selected(output_dir, case_numbers, civil=args.civil)
         return
 
     if args.input:
