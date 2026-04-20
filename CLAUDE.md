@@ -106,8 +106,8 @@ Template fonts (from original court templates):
 - **Ruling document** (`_generate_ruling`): Cannot use docxtpl for defendant paragraphs because `{{ }}` can't create new paragraphs. Instead uses python-docx with `deepcopy` of paragraph XML elements, preserving formatting (JUSTIFY, line_spacing=355600, first_indent=401320).
 - **Ethnicity handling**: AI extracts `汉` from ID cards, but ruling document appends `族` to produce `汉族` if not already present.
 - **Chinese dates**: `_date_to_chinese()` converts dates to format like `二〇二六年四月十四日` (〇 is Chinese zero U+3007).
-- **Fixed values in templates**: 联系人：徐世幸, 联系电话：0755-86608204, 本院地址：深圳市南山区玉泉路26号 are fixed in the main body of assist notices. Only the receipt (回执) section has empty fields.
-- **Fixed values in ruling**: 审判员 王炜, 书记员 徐世幸 are fixed, never templated.
+- **Fixed values in templates**: 联系人、联系电话、本院地址 are fixed in the main body of assist notices. Only the receipt (回执) section has empty fields. Actual values are hardcoded in `doc_generator.py`.
+- **Fixed values in ruling**: 审判员 and 书记员 names are fixed, never templated. Actual values are hardcoded in `doc_generator.py`.
 
 ### Web Interface
 
