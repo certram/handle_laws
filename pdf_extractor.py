@@ -1,6 +1,7 @@
 import logging
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pdfplumber
@@ -57,8 +58,11 @@ def extract_text_from_single_pdf(pdf_path: Path) -> str:
         Path(tmp_path).unlink(missing_ok=True)
 
 
-def extract_all_pdfs(folder_path: Path) -> dict[str, str]:
-    """遍历文件夹中所有PDF，返回 {文件名: 提取文本} 的字典。"""
+def extract_all_pdfs(folder_path: Path, max_workers: int = 2) -> dict[str, str]:
+    """
+    遍历文件夹中所有PDF，返回 {文件名: 提取文本} 的字典。
+    多个PDF并行提取，文本型PDF不需要并发（很快），OCR型PDF并行可节省时间。
+    """
     folder_path = Path(folder_path)
     if not folder_path.exists():
         raise FileNotFoundError(f"文件夹不存在: {folder_path}")
@@ -70,9 +74,30 @@ def extract_all_pdfs(folder_path: Path) -> dict[str, str]:
         logger.warning("文件夹中没有PDF文件: %s", folder_path)
         return results
 
-    for pdf_file in pdf_files:
-        logger.info("正在处理: %s", pdf_file.name)
-        text = extract_text_from_single_pdf(pdf_file)
-        results[pdf_file.name] = text
+    total = len(pdf_files)
+    logger.info("共 %d 个PDF文件，并行提取", total)
+
+    if max_workers <= 1 or total <= 1:
+        # 单线程：直接顺序处理
+        for i, pdf_file in enumerate(pdf_files, 1):
+            logger.info("正在处理 PDF %d/%d: %s", i, total, pdf_file.name)
+            text = extract_text_from_single_pdf(pdf_file)
+            results[pdf_file.name] = text
+    else:
+        # 多线程并行提取
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_name = {
+                executor.submit(extract_text_from_single_pdf, pdf_file): pdf_file.name
+                for pdf_file in pdf_files
+            }
+            for future in as_completed(future_to_name):
+                name = future_to_name[future]
+                try:
+                    text = future.result()
+                    results[name] = text
+                    logger.info("PDF提取完成: %s", name)
+                except Exception as e:
+                    logger.error("PDF提取失败 %s: %s", name, e)
+                    results[name] = ""
 
     return results

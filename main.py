@@ -2,14 +2,15 @@ import argparse
 import json
 import logging
 import shutil
-import sys
-from datetime import date, datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 import yaml
+from tqdm import tqdm
 
 from pdf_extractor import extract_all_pdfs
-from ai_extractor import extract_case_info
+from ai_extractor import extract_case_info, extract_credit_code, extract_id_number, extract_property_clues
 from yaml_generator import generate_yaml
 from doc_generator import generate_docs
 
@@ -117,6 +118,132 @@ def _normalize_case_data(case_data: dict) -> dict:
     return case_data
 
 
+def _extract_bank_accounts_from_text(case_data: dict):
+    """
+    当银行账号为空时，从详细内容中用正则提取银行卡号。
+
+    银行账号特征：10-23位纯数字字符串。
+    排除：手机号(1开头11位)、身份证号(17位数字+X)、统一社会信用代码(18位含字母)。
+    """
+    import re
+
+    preservation = case_data.get("保全信息", {})
+    clues = preservation.get("财产线索", [])
+
+    # 银行账号：10-23位纯数字
+    bank_account_pattern = re.compile(r'\b(\d{10,23})\b')
+
+    for clue in clues:
+        if clue.get("银行账号", "").strip():
+            continue  # 已有账号，跳过
+
+        detail = clue.get("详细内容", "")
+        if not detail:
+            continue
+
+        candidates = bank_account_pattern.findall(detail)
+        for num in candidates:
+            # 排除手机号：1开头11位
+            if len(num) == 11 and num.startswith("1"):
+                continue
+            # 排除身份证号前17位：虽然不太可能精确匹配，但保险起见
+            if len(num) == 18:
+                continue
+            # 取最长的（更可能是银行账号）
+            clue["银行账号"] = num
+            logger.info("正则提取银行账号: '%s' <- '%s'", num, detail[:60])
+            break
+
+
+def _validate_and_fix_ids(case_data: dict, all_texts: dict[str, str]):
+    """
+    校验统一社会信用代码和身份证号码的格式，不通过则二次提取。
+
+    统一社会信用代码：必须是18位（数字和大写字母）
+    身份证号码：必须是18位（前17位数字，最后一位数字或X）
+    """
+    import re
+
+    credit_code_pattern = re.compile(r'^[0-9A-Z]{18}$')
+    id_number_pattern = re.compile(r'^\d{17}[\dX]$')
+
+    for role in ["原告", "被告"]:
+        parties = case_data.get(role, [])
+        for party in parties:
+            if party.get("类型") == "公司":
+                code = str(party.get("统一社会信用代码", "")).strip()
+                if code and not credit_code_pattern.match(code):
+                    logger.warning(
+                        "%s「%s」统一社会信用代码格式错误: '%s'（%d位），触发二次提取",
+                        role, party.get("全称", ""), code, len(code),
+                    )
+                    new_code = extract_credit_code(all_texts, party["全称"])
+                    if credit_code_pattern.match(new_code):
+                        party["统一社会信用代码"] = new_code
+                        logger.info("二次提取成功: '%s' → '%s'", code, new_code)
+                    else:
+                        logger.warning("二次提取仍未通过校验: '%s'（%d位），放弃修正", new_code, len(new_code))
+
+            elif party.get("类型") == "个人":
+                id_num = str(party.get("身份证号码", "")).strip()
+                if id_num and not id_number_pattern.match(id_num):
+                    logger.warning(
+                        "%s「%s」身份证号码格式错误: '%s'（%d位），触发二次提取",
+                        role, party.get("姓名", ""), id_num, len(id_num),
+                    )
+                    new_id = extract_id_number(all_texts, party["姓名"])
+                    if id_number_pattern.match(new_id):
+                        party["身份证号码"] = new_id
+                        logger.info("二次提取成功: '%s' → '%s'", id_num, new_id)
+                    else:
+                        logger.warning("二次提取仍未通过校验: '%s'（%d位），放弃修正", new_id, len(new_id))
+
+
+def _validate_personal_fields_from_id(case_data: dict):
+    """
+    个人类型当事人6项必要字段：姓名、性别、出生日期、身份证号码、住址、民族。
+    AI 优先提取，然后用身份证号码校验性别和出生日期：
+    - AI 提取正确 → 保持不变
+    - AI 提取错误或为空 → 以身份证号码推导结果为准
+    """
+    for role in ["原告", "被告"]:
+        parties = case_data.get(role, [])
+        for party in parties:
+            if party.get("类型") != "个人":
+                continue
+
+            id_num = str(party.get("身份证号码", "")).strip()
+            if len(id_num) != 18:
+                continue
+
+            name = party.get("姓名", "")
+
+            # 从身份证号码推导出生日期（第7-14位：YYYYMMDD）
+            derived_date = f"{id_num[6:10]}年{id_num[10:12]}月{id_num[12:14]}日"
+            ai_date = party.get("出生日期", "").strip()
+            if not ai_date:
+                party["出生日期"] = derived_date
+                logger.info("补全出生日期: %s → %s（从身份证号推导）", name, derived_date)
+            elif ai_date != derived_date:
+                logger.warning("出生日期不一致: %s AI='%s' 身份证号='%s'，以身份证号为准", name, ai_date, derived_date)
+                party["出生日期"] = derived_date
+
+            # 从身份证号码推导性别（第17位：奇数=男，偶数=女）
+            derived_gender = "男" if int(id_num[16]) % 2 == 1 else "女"
+            ai_gender = party.get("性别", "").strip()
+            if not ai_gender:
+                party["性别"] = derived_gender
+                logger.info("补全性别: %s → %s（从身份证号推导）", name, derived_gender)
+            elif ai_gender != derived_gender:
+                logger.warning("性别不一致: %s AI='%s' 身份证号='%s'，以身份证号为准", name, ai_gender, derived_gender)
+                party["性别"] = derived_gender
+
+            # 民族为空时默认汉族
+            if not party.get("民族", "").strip():
+                party["民族"] = "汉"
+                logger.info("补全民族: %s → 汉（默认值）", name)
+
+
 def process_case(input_folder: Path, output_folder: Path, force: bool = False, civil: bool = False) -> Path:
     """
     处理单个案件文件夹的完整流程。
@@ -151,6 +278,27 @@ def process_case(input_folder: Path, output_folder: Path, force: bool = False, c
         # 标准化字段名
         _normalize_case_data(case_data)
 
+        # 从详细内容中正则提取银行账号（AI漏提取时的回退）
+        _extract_bank_accounts_from_text(case_data)
+
+        # 校验并修正关键字段（统一社会信用代码18位、身份证号码18位）
+        _validate_and_fix_ids(case_data, all_texts)
+
+        # 用身份证号码校验并补全个人信息（性别、出生日期）
+        _validate_personal_fields_from_id(case_data)
+
+        # 财产线索为空时，触发二次提取
+        preservation = case_data.get("保全信息", {})
+        clues = preservation.get("财产线索", [])
+        if not clues:
+            logger.warning("财产线索为空，触发二次提取")
+            new_clues = extract_property_clues(all_texts)
+            if new_clues:
+                preservation["财产线索"] = new_clues
+                logger.info("二次提取财产线索成功，共 %d 条", len(new_clues))
+            else:
+                logger.warning("二次提取财产线索仍为空")
+
         # 从目录名覆盖案号（优先使用目录名，比AI提取更准确）
         dir_case_number = _extract_case_number_from_dir(input_folder.name)
         if dir_case_number:
@@ -168,7 +316,7 @@ def process_case(input_folder: Path, output_folder: Path, force: bool = False, c
     return output_folder
 
 
-def process_all_cases(input_dir: Path, output_dir: Path, only_new: bool = False, force: bool = False, civil: bool = False):
+def process_all_cases(input_dir: Path, output_dir: Path, only_new: bool = False, force: bool = False, civil: bool = False, workers: int = 1):
     """
     扫描输入目录，自动识别单案件或多案件模式。
 
@@ -176,6 +324,7 @@ def process_all_cases(input_dir: Path, output_dir: Path, only_new: bool = False,
     - 如果 input_dir 下直接有PDF文件，视为单个案件（兼容旧模式）
     - only_new=True 时，只处理尚未标记为已处理的案件
     - civil=True 时只生成外勤类协助执行通知书（跳过鹰眼和支付宝）
+    - workers>1 时使用多线程并行处理案件
     """
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
@@ -191,15 +340,56 @@ def process_all_cases(input_dir: Path, output_dir: Path, only_new: bool = False,
                 logger.info("没有新案件需要处理")
                 return
 
-        logger.info("检测到 %d 个案件文件夹", len(subdirs))
-        for case_dir in subdirs:
-            case_name = case_dir.name
-            case_output = output_dir / case_name
-            try:
-                process_case(case_dir, case_output, force=force, civil=civil)
-            except Exception as e:
-                logger.error("案件 %s 处理失败: %s", case_name, e)
-                continue
+        total = len(subdirs)
+        logger.info("检测到 %d 个案件文件夹，并发数: %d", total, workers)
+
+        if workers > 1:
+            # 多线程并行处理
+            success_count = 0
+            fail_count = 0
+
+            def _process_one(i_case):
+                """处理单个案件，返回 (序号, 案件名, 异常或None)。"""
+                i, case_dir = i_case
+                case_name = case_dir.name
+                case_output = output_dir / case_name
+                logger.info("========== 案件 %d/%d: %s ==========", i, total, case_name)
+                try:
+                    process_case(case_dir, case_output, force=force, civil=civil)
+                    return (i, case_name, None)
+                except Exception as e:
+                    logger.error("案件 %s 处理失败: %s", case_name, e)
+                    return (i, case_name, e)
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(_process_one, (i, case_dir)): case_dir.name
+                    for i, case_dir in enumerate(subdirs, 1)
+                }
+                pbar = tqdm(total=total, desc="处理案件", unit="案", ncols=80)
+                for future in as_completed(futures):
+                    _, case_name, error = future.result()
+                    if error:
+                        fail_count += 1
+                    else:
+                        success_count += 1
+                    pbar.update(1)
+                    pbar.set_postfix_str(f"成功{success_count} 失败{fail_count}")
+                pbar.close()
+
+            logger.info("全部完成: 成功 %d, 失败 %d, 共 %d", success_count, fail_count, total)
+        else:
+            # 单线程顺序处理，带进度条
+            pbar = tqdm(subdirs, desc="处理案件", unit="案", ncols=80)
+            for case_dir in pbar:
+                case_name = case_dir.name
+                case_output = output_dir / case_name
+                pbar.set_postfix_str(case_name[:20])
+                try:
+                    process_case(case_dir, case_output, force=force, civil=civil)
+                except Exception as e:
+                    logger.error("案件 %s 处理失败: %s", case_name, e)
+                    continue
     else:
         # 单案件目录（无子文件夹），输出到 output_dir/案件名/ 下
         case_output = output_dir / input_dir.name
@@ -235,7 +425,8 @@ def _regenerate_selected(output_dir: Path, case_numbers: list[str], civil: bool 
         logger.warning("outputs/ 下没有案件目录")
         return
 
-    for num in case_numbers:
+    for i, num in enumerate(case_numbers, 1):
+        logger.info("========== 重新生成 %d/%d: 案号 %s ==========", i, len(case_numbers), num)
         # 用 "民初{num}号" 精确匹配，避免误匹配日期或其他数字
         pattern = re.compile(rf"民初{re.escape(num)}号")
         matched = [d for d in subdirs if pattern.search(d.name)]
@@ -311,6 +502,7 @@ def main():
     parser.add_argument("--civil", action="store_true", help="民事模式：只生成外勤类协助执行通知书（跳过鹰眼和支付宝）")
     parser.add_argument("--reset", "-r", action="store_true", help="重置：清空outputs/和original_files/下所有子目录及文件")
     parser.add_argument("--regen", action="store_true", help="从 regenerate.json 读取案号列表，从YAML重新生成docx")
+    parser.add_argument("--workers", "-w", type=int, default=1, help="并发处理案件数（默认1，建议3-5）")
     args = parser.parse_args()
 
     project_root = Path(__file__).parent
@@ -374,7 +566,7 @@ def main():
     if args.clean:
         _clean_docx_files(output_dir)
 
-    process_all_cases(input_dir, output_dir, only_new=args.new, force=args.force, civil=args.civil)
+    process_all_cases(input_dir, output_dir, only_new=args.new, force=args.force, civil=args.civil, workers=args.workers)
 
 
 if __name__ == "__main__":

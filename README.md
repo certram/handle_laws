@@ -71,13 +71,23 @@ sudo apt install tesseract-ocr tesseract-ocr-chi-sim
 
 ### 4. 配置API密钥
 
-编辑项目根目录下的 `settings.yaml`，填入你的 DashScope API Key：
+编辑项目根目录下的 `settings.yaml`，填入你的 API Key 并选择模型：
 
 ```yaml
-api:
-  api_key: "你的API Key"
-  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  model: "qwen-long"
+# AI 模型配置（used: true 的模型会被使用，只能有一个）
+models:
+  - name: "qwen-long"
+    api_key: "你的API Key"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model: "qwen-long"
+    used: true
+
+  # 取消注释即可使用，将上面的 used 改为 false，下面的改为 true
+  # - name: "deepseek"
+  #   api_key: "你的DeepSeek API Key"
+  #   base_url: "https://api.deepseek.com/v1"
+  #   model: "deepseek-chat"
+  #   used: false
 
 naming:
   civil_first: "26民初"
@@ -88,9 +98,22 @@ delete:
   - "银行"
 ```
 
-- `api_key`：DashScope API密钥
+- `models`：模型列表，**只能有一个** `used: true`，程序启动时会校验
+- `name`：模型备注名（仅用于区分，不影响调用）
+- `api_key` / `base_url` / `model`：OpenAI 兼容接口的三要素
 - `civil_first`：保全卷和裁定书文件名的前缀，如 `26民初13074保全卷.docx`
 - `delete`：`delete_docs.py` 默认删除的协助执行通知书类型，支持的关键词：支付宝、财付通、银行、房产、股权、车辆。命令行参数可覆盖此配置
+
+支持的模型示例（只要提供 OpenAI 兼容接口即可）：
+
+| 提供商 | base_url | model | 上下文窗口 |
+|--------|----------|-------|-----------|
+| 阿里云 DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-long` | 1M |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` | 128K |
+| 月之暗面 | `https://api.moonshot.cn/v1` | `moonshot-v1-128k` | 128K |
+| MiniMax | `https://api.minimax.chat/v1` | `MiniMax-M1` | 1M |
+
+> 注意：切换模型时需确认上下文窗口是否足够容纳案件的全部 PDF 文本。qwen-long 和 MiniMax-M1 支持 1M tokens，适合多文件案件。
 
 API Key 获取方式：登录 [阿里云DashScope控制台](https://dashscope.console.aliyun.com/) 创建。
 
@@ -308,8 +331,22 @@ python3 main.py --civil ~/Desktop/案件材料/                                #
 | `python main.py --regen` | 从 regenerate.json 读取案号，批量从 YAML 重新生成 Word |
 | `python main.py "目录名"` | 从 outputs 中已有 YAML 重新生成 Word |
 | `python main.py /path/to/dir` | 指定输入目录处理 |
+| `python main.py -w 3` | 3个线程并行处理案件（默认1） |
 
-`--civil` 可与 `--new`、`-c`、`-f` 叠加使用。
+`--civil` 可与 `--new`、`-c`、`-f`、`--regen` 叠加使用。
+
+### 多线程并发处理（--workers / -w）
+
+批量处理案件时，可通过 `--workers` 指定并发数，多线程同时处理多个案件，显著缩短总耗时：
+
+```bash
+python main.py -w 3              # 3个线程并行处理所有案件
+python main.py -w 5 --new        # 5个线程并行处理新案件
+python main.py -w 3 -f           # 3个线程强制重新处理所有案件
+python main.py -w 3 --civil      # 民事模式 + 并发
+```
+
+> 建议并发数 3-5。过高的并发可能触发 API 限流。默认 `--workers 1` 即单线程顺序处理，行为与之前一致。
 
 ## 输入要求
 
@@ -329,9 +366,26 @@ python3 main.py --civil ~/Desktop/案件材料/                                #
 ### 支持的当事人类型
 
 - **公司**：提取全称、统一社会信用代码、法定代表人、所在地、联系方式
-- **个人**：提取姓名、性别、出生日期、身份证号码、住址、联系方式
+- **个人**：提取姓名、性别、出生日期、身份证号码、住址、民族（6项必要字段）
 
 每个案件的原告和被告都可以有多个，混合类型也支持。
+
+**个人字段校验与补全：**
+
+| 字段 | AI提取 | 自动补全规则 |
+|------|--------|-------------|
+| 姓名 | 优先 | — |
+| 性别 | 优先 | 为空或与身份证号不一致时，从身份证号第17位推导（奇数=男，偶数=女） |
+| 出生日期 | 优先 | 为空或与身份证号不一致时，从身份证号第7-14位推导 |
+| 身份证号码 | 优先 | 不满18位时触发二次AI提取 |
+| 住址 | 优先 | — |
+| 民族 | 优先 | 为空时默认"汉" |
+
+**其他校验：**
+
+- 统一社会信用代码不满18位时，触发二次AI提取
+- 财产线索为空时，触发二次AI提取
+- 银行账号为空但详细内容中包含长数字串时，正则回退提取
 
 ### 支持的财产线索类型
 
@@ -412,21 +466,32 @@ python3 main.py --civil ~/Desktop/案件材料/                                #
 ## 处理流程
 
 ```
-PDF文件 → 文本提取(pdfplumber/OCR) → AI提取(Qwen-Long) → YAML文件
-                                                     → 保全裁定书（每案1份）
-                                                     → 保全卷（每案1份，鹰眼/外勤分类）
-                                                     → 协助执行通知书（每条线索1份）
+PDF文件 → 文本提取(pdfplumber/OCR) → AI提取(DeepSeek/Qwen-Long) → 字段标准化
+                                                                 → 银行账号正则回退
+                                                                 → 统一社会信用代码/身份证号校验
+                                                                 → 个人字段校验（性别/出生日期/民族）
+                                                                 → 财产线索二次提取（为空时）
+                                                                 → YAML文件
+                                                                 → 保全裁定书（每案1份）
+                                                                 → 保全卷（每案1份，鹰眼/外勤分类）
+                                                                 → 协助执行通知书（每条线索1份）
 ```
 
 1. 遍历案件文件夹中所有PDF文件
 2. 文本型PDF用pdfplumber直接提取文字；扫描件自动启用ocrmypdf进行OCR
-3. 所有PDF的文本合并后，一次性发送给AI模型（Qwen-Long），AI交叉引用多份文档提取完整信息
-4. 生成结构化YAML文件保存提取结果
-5. 根据案件数据生成保全裁定书（每案1份）
-6. 根据案件数据生成保全卷（每案1份），财产线索按鹰眼/外勤分类：
-   - **鹰眼**：23家鹰眼银行账户、深圳市内房产/股权/车辆
-   - **外勤**：非鹰眼银行账户、深圳市外房产/股权/车辆、支付宝、财付通
-7. 根据财产线索类型匹配Word模板，逐条生成协助执行通知书
+3. 所有PDF的文本合并后，一次性发送给AI模型，AI交叉引用多份文档提取完整信息
+4. **字段标准化**：将AI输出的变体字段名映射为标准名称
+5. **银行账号正则回退**：AI未提取银行账号时，从详细内容中用正则匹配10-23位数字
+6. **统一社会信用代码校验**：不满18位触发二次AI提取
+7. **身份证号码校验**：不满18位触发二次AI提取
+8. **个人字段校验**：用身份证号校验性别和出生日期（不一致时以身份证号为准），民族为空默认"汉"
+9. **财产线索二次提取**：线索为空时，触发专项AI提取
+10. 生成结构化YAML文件保存提取结果
+11. 根据案件数据生成保全裁定书（每案1份）
+12. 根据案件数据生成保全卷（每案1份），财产线索按鹰眼/外勤分类：
+    - **鹰眼**：23家鹰眼银行账户、深圳市内房产/股权/车辆
+    - **外勤**：非鹰眼银行账户、深圳市外房产/股权/车辆、支付宝、财付通
+13. 根据财产线索类型匹配Word模板，逐条生成协助执行通知书
 
 ## 常见问题
 

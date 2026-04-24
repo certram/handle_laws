@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 
 from openai import OpenAI
 
@@ -194,3 +193,112 @@ def extract_property_info(text: str) -> dict[str, str]:
     result_str = resp.choices[0].message.content.strip()
     logger.info("AI提取房产信息: '%s' <- '%s'", result_str, text[:60])
     return _parse_json_response(result_str)
+
+
+def extract_credit_code(all_texts: dict[str, str], company_name: str) -> str:
+    """
+    从所有PDF文本中精准提取某公司的统一社会信用代码（必须18位）。
+
+    用于主提取结果校验不通过时的二次提取。
+    """
+    documents_text = _build_documents_text(all_texts)
+    resp = client.chat.completions.create(
+        model=MODEL_NAME,
+        temperature=0,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "你是一个信息提取助手。用户会给多份法律文书文本，你需要从中找到指定公司的统一社会信用代码。\n"
+                    "统一社会信用代码规则：必须是18位，由数字0-9和大写字母A-Z组成（不含I、O、Z、S、V）。\n"
+                    "OCR识别可能导致数字多一位或少一位，请仔细数清楚，确保恰好18位。\n"
+                    "只返回18位代码本身，不要返回任何其他内容。如果无法确认完整18位，返回空字符串。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"请从以下文档中提取「{company_name}」的统一社会信用代码（必须18位）：\n\n{documents_text}",
+            },
+        ],
+    )
+
+    result = resp.choices[0].message.content.strip()
+    logger.info("二次提取统一社会信用代码: '%s' <- 公司: %s", result, company_name)
+    return result
+
+
+def extract_id_number(all_texts: dict[str, str], person_name: str) -> str:
+    """
+    从所有PDF文本中精准提取某人的身份证号码（必须18位）。
+
+    用于主提取结果校验不通过时的二次提取。
+    """
+    documents_text = _build_documents_text(all_texts)
+    resp = client.chat.completions.create(
+        model=MODEL_NAME,
+        temperature=0,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "你是一个信息提取助手。用户会给多份法律文书文本，你需要从中找到指定人员的身份证号码。\n"
+                    "身份证号码规则：必须是18位，前17位为数字，最后一位为数字或字母X。\n"
+                    "OCR识别可能导致数字多一位或少一位，请仔细数清楚，确保恰好18位。\n"
+                    "只返回18位身份证号码本身，不要返回任何其他内容。如果无法确认完整18位，返回空字符串。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"请从以下文档中提取「{person_name}」的身份证号码（必须18位）：\n\n{documents_text}",
+            },
+        ],
+    )
+
+    result = resp.choices[0].message.content.strip()
+    logger.info("二次提取身份证号码: '%s' <- 姓名: %s", result, person_name)
+    return result
+
+
+def extract_property_clues(all_texts: dict[str, str]) -> list:
+    """
+    从所有PDF文本中精准提取财产线索列表（主提取为空时的二次提取）。
+
+    返回财产线索列表，每个元素包含：类型、详细内容、归属地。
+    """
+    documents_text = _build_documents_text(all_texts)
+    resp = client.chat.completions.create(
+        model=MODEL_NAME,
+        temperature=0,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "你是一个信息提取助手。用户会给多份法律文书文本，你需要从中提取所有财产线索。\n"
+                    "财产线索通常出现在「财产保全申请书」「财产线索表」「财产线索」等文件中。\n"
+                    "每条线索包含：\n"
+                    "- 类型：银行账户、房产、股权、支付宝、财付通、车辆等\n"
+                    "- 详细内容：完整的线索描述（包含开户行、账号、地址等所有细节）\n"
+                    "- 归属地：城市名（如 深圳、广州）\n"
+                    "只返回JSON数组，不要返回任何其他内容。格式如下：\n"
+                    '[{"类型": "银行账户", "详细内容": "...", "归属地": "深圳"}]\n'
+                    "如果确实没有找到任何财产线索，返回空数组 []。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"请从以下文档中提取所有财产线索：\n\n{documents_text}",
+            },
+        ],
+    )
+
+    result_str = resp.choices[0].message.content.strip()
+    logger.info("二次提取财产线索: '%s'", result_str[:200])
+    try:
+        clues = _parse_json_response(result_str)
+        if isinstance(clues, list):
+            return clues
+        logger.warning("二次提取财产线索返回非数组类型: %s", type(clues))
+        return []
+    except Exception as e:
+        logger.warning("二次提取财产线索解析失败: %s", e)
+        return []
