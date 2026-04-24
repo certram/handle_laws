@@ -4,7 +4,7 @@
 
 ## 功能概述
 
-1. **PDF文本提取** - 自动识别文本型PDF和扫描件（图片型PDF），扫描件自动启用OCR识别
+1. **PDF文本提取** - 支持文本型PDF直接提取和扫描件OCR识别。OCR使用智谱GLM-OCR模型（通过 `zai-sdk` 调用），可配置强制所有PDF走OCR模式
 2. **AI跨文档信息提取** - 将一个案件的所有PDF内容合并后交给AI，智能交叉提取完整的案件信息，生成结构化YAML文件
 3. **协助执行通知书生成** - 根据财产线索类型，自动匹配模板生成对应的协助执行通知书（Word文档），每条财产线索生成一份
 
@@ -15,9 +15,10 @@ handle_laws/
 ├── main.py              # 主入口，运行这个文件启动处理
 ├── delete_docs.py       # 按类型删除协助执行通知书
 ├── config.py            # 配置加载（从settings.yaml读取）
-├── settings.yaml        # 配置文件（API密钥、模型、文件命名、删除配置）
-├── pdf_extractor.py     # PDF文本提取模块（pdfplumber + ocrmypdf OCR兜底）
-├── ai_extractor.py      # AI结构化信息提取模块（Qwen-Long）
+├── settings.yaml        # 配置文件（API密钥、模型、OCR、文件命名、删除配置）
+├── pdf_extractor.py     # PDF文本提取模块（pdfplumber + 智谱GLM-OCR）
+├── zhipu_ocr.py         # 智谱GLM-OCR模块（zai-sdk，layout_parsing API）
+├── ai_extractor.py      # AI结构化信息提取模块（DeepSeek/Qwen-Long等）
 ├── yaml_generator.py    # YAML文件生成模块
 ├── doc_generator.py     # Word文书生成模块（协助执行通知书 + 裁定书 + 保全卷）
 ├── requirements.txt     # Python依赖列表
@@ -52,42 +53,38 @@ pip install -r requirements.txt
 | 包名 | 用途 |
 |------|------|
 | pdfplumber | 文本型PDF文字提取 |
-| ocrmypdf | 扫描件PDF的OCR识别 |
-| openai | 调用通义千问API（OpenAI兼容接口） |
+| pdf2image | PDF转图片（OCR前处理） |
+| zai-sdk | 智谱AI官方SDK（GLM-OCR调用） |
+| openai | 调用AI模型API（OpenAI兼容接口） |
 | pyyaml | 读写YAML配置文件 |
 | docxtpl | Word模板渲染（Jinja2语法） |
 
-### 3. 安装Tesseract OCR（处理扫描件PDF需要）
-
-```bash
-# macOS
-brew install tesseract tesseract-lang
-
-# Ubuntu/Debian
-sudo apt install tesseract-ocr tesseract-ocr-chi-sim
-```
-
-> 如果案件PDF全部是文本型（非扫描件），可以不安装Tesseract。
-
-### 4. 配置API密钥
+### 3. 配置API密钥
 
 编辑项目根目录下的 `settings.yaml`，填入你的 API Key 并选择模型：
 
 ```yaml
 # AI 模型配置（used: true 的模型会被使用，只能有一个）
 models:
-  - name: "qwen-long"
-    api_key: "你的API Key"
-    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    model: "qwen-long"
+  - name: "deepseek"
+    api_key: "你的DeepSeek API Key"
+    base_url: "https://api.deepseek.com/v1"
+    model: "deepseek-chat"
     used: true
 
-  # 取消注释即可使用，将上面的 used 改为 false，下面的改为 true
-  # - name: "deepseek"
-  #   api_key: "你的DeepSeek API Key"
-  #   base_url: "https://api.deepseek.com/v1"
-  #   model: "deepseek-chat"
-  #   used: false
+  # 也支持智谱GLM模型进行结构化提取
+  # - name: "glm"
+  #   api_key: "你的智谱API Key"
+  #   base_url: "https://open.bigmodel.cn/api/paas/v4/"
+  #   model: "glm-4-flash"
+  #   used: true
+
+# OCR 配置
+ocr:
+  provider: "zhipu"              # "zhipu" 使用智谱GLM-OCR，"ocrmypdf" 使用本地Tesseract
+  api_key: "你的智谱API Key"      # 智谱API Key
+  model: "glm-ocr"               # 智谱OCR模型：glm-ocr（专用OCR）、glm-4v-flash（免费视觉）
+  force: true                    # true=所有PDF都走OCR，false=文本型PDF直接提取
 
 naming:
   civil_first: "26民初"
@@ -98,9 +95,9 @@ delete:
   - "银行"
 ```
 
-- `models`：模型列表，**只能有一个** `used: true`，程序启动时会校验
-- `name`：模型备注名（仅用于区分，不影响调用）
-- `api_key` / `base_url` / `model`：OpenAI 兼容接口的三要素
+- `models`：AI模型列表，**只能有一个** `used: true`，程序启动时会校验
+- `ocr.provider`：OCR引擎选择，`zhipu` 使用智谱GLM-OCR（推荐），`ocrmypdf` 使用本地Tesseract
+- `ocr.force`：设为 `true` 时所有PDF都走OCR识别（更准确但更慢），设为 `false` 时文本型PDF直接提取、仅图片型走OCR
 - `civil_first`：保全卷和裁定书文件名的前缀，如 `26民初13074保全卷.docx`
 - `delete`：`delete_docs.py` 默认删除的协助执行通知书类型，支持的关键词：支付宝、财付通、银行、房产、股权、车辆。命令行参数可覆盖此配置
 
@@ -108,14 +105,13 @@ delete:
 
 | 提供商 | base_url | model | 上下文窗口 |
 |--------|----------|-------|-----------|
-| 阿里云 DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-long` | 1M |
 | DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` | 128K |
+| 智谱AI | `https://open.bigmodel.cn/api/paas/v4/` | `glm-4-flash` / `glm-4-plus` | 128K |
+| 阿里云 DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-long` | 1M |
 | 月之暗面 | `https://api.moonshot.cn/v1` | `moonshot-v1-128k` | 128K |
 | MiniMax | `https://api.minimax.chat/v1` | `MiniMax-M1` | 1M |
 
 > 注意：切换模型时需确认上下文窗口是否足够容纳案件的全部 PDF 文本。qwen-long 和 MiniMax-M1 支持 1M tokens，适合多文件案件。
-
-API Key 获取方式：登录 [阿里云DashScope控制台](https://dashscope.console.aliyun.com/) 创建。
 
 ## 使用方法
 
@@ -375,8 +371,8 @@ python main.py -w 3 --civil      # 民事模式 + 并发
 | 字段 | AI提取 | 自动补全规则 |
 |------|--------|-------------|
 | 姓名 | 优先 | — |
-| 性别 | 优先 | 为空或与身份证号不一致时，从身份证号第17位推导（奇数=男，偶数=女） |
-| 出生日期 | 优先 | 为空或与身份证号不一致时，从身份证号第7-14位推导 |
+| 性别 | 优先 | 为空时从身份证号第17位推导（奇数=男，偶数=女） |
+| 出生日期 | 优先 | 为空时从身份证号第7-14位推导 |
 | 身份证号码 | 优先 | 不满18位时触发二次AI提取 |
 | 住址 | 优先 | — |
 | 民族 | 优先 | 为空时默认"汉" |
@@ -466,10 +462,10 @@ python main.py -w 3 --civil      # 民事模式 + 并发
 ## 处理流程
 
 ```
-PDF文件 → 文本提取(pdfplumber/OCR) → AI提取(DeepSeek/Qwen-Long) → 字段标准化
+PDF文件 → 文本提取(pdfplumber/智谱GLM-OCR) → AI提取(DeepSeek/GLM等) → 字段标准化
                                                                  → 银行账号正则回退
                                                                  → 统一社会信用代码/身份证号校验
-                                                                 → 个人字段校验（性别/出生日期/民族）
+                                                                 → 个人字段补全（性别/出生日期/民族）
                                                                  → 财产线索二次提取（为空时）
                                                                  → YAML文件
                                                                  → 保全裁定书（每案1份）
@@ -478,13 +474,15 @@ PDF文件 → 文本提取(pdfplumber/OCR) → AI提取(DeepSeek/Qwen-Long) → 
 ```
 
 1. 遍历案件文件夹中所有PDF文件
-2. 文本型PDF用pdfplumber直接提取文字；扫描件自动启用ocrmypdf进行OCR
+2. 根据 `ocr.force` 配置选择提取方式：
+   - `force: true`：所有PDF都通过智谱GLM-OCR识别（`layout_parsing` API），PDF先转为图片再逐页OCR
+   - `force: false`：文本型PDF用pdfplumber直接提取；图片型PDF走智谱GLM-OCR兜底
 3. 所有PDF的文本合并后，一次性发送给AI模型，AI交叉引用多份文档提取完整信息
 4. **字段标准化**：将AI输出的变体字段名映射为标准名称
 5. **银行账号正则回退**：AI未提取银行账号时，从详细内容中用正则匹配10-23位数字
 6. **统一社会信用代码校验**：不满18位触发二次AI提取
 7. **身份证号码校验**：不满18位触发二次AI提取
-8. **个人字段校验**：用身份证号校验性别和出生日期（不一致时以身份证号为准），民族为空默认"汉"
+8. **个人字段补全**：性别/出生日期为空时从身份证号推导补全，民族为空默认"汉"
 9. **财产线索二次提取**：线索为空时，触发专项AI提取
 10. 生成结构化YAML文件保存提取结果
 11. 根据案件数据生成保全裁定书（每案1份）
@@ -495,13 +493,11 @@ PDF文件 → 文本提取(pdfplumber/OCR) → AI提取(DeepSeek/Qwen-Long) → 
 
 ## 常见问题
 
-**Q: 扫描件PDF提取失败怎么办？**
+**Q: OCR识别失败或报错？**
 
-确认已安装Tesseract OCR和中文语言包：
-
-```bash
-tesseract --list-langs  # 检查是否包含 chi_sim
-```
+- 确认 `settings.yaml` 中 `ocr.api_key` 已填入有效的智谱API Key
+- 确认智谱账户余额充足（GLM-OCR 为付费服务，0.2元/百万Tokens）
+- GLM-OCR 失败时会自动回退到 `glm-4v-flash`（免费视觉模型）
 
 **Q: AI提取的信息不完整或不准确？**
 

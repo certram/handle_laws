@@ -202,9 +202,7 @@ def _validate_and_fix_ids(case_data: dict, all_texts: dict[str, str]):
 def _validate_personal_fields_from_id(case_data: dict):
     """
     个人类型当事人6项必要字段：姓名、性别、出生日期、身份证号码、住址、民族。
-    AI 优先提取，然后用身份证号码校验性别和出生日期：
-    - AI 提取正确 → 保持不变
-    - AI 提取错误或为空 → 以身份证号码推导结果为准
+    AI 优先提取，AI 有值则保留；为空时从身份证号码推导补全。
     """
     for role in ["原告", "被告"]:
         parties = case_data.get(role, [])
@@ -218,25 +216,17 @@ def _validate_personal_fields_from_id(case_data: dict):
 
             name = party.get("姓名", "")
 
-            # 从身份证号码推导出生日期（第7-14位：YYYYMMDD）
-            derived_date = f"{id_num[6:10]}年{id_num[10:12]}月{id_num[12:14]}日"
-            ai_date = party.get("出生日期", "").strip()
-            if not ai_date:
+            # 从身份证号码推导出生日期（第7-14位：YYYYMMDD），仅当AI未提取时补全
+            if not party.get("出生日期", "").strip():
+                derived_date = f"{id_num[6:10]}年{id_num[10:12]}月{id_num[12:14]}日"
                 party["出生日期"] = derived_date
                 logger.info("补全出生日期: %s → %s（从身份证号推导）", name, derived_date)
-            elif ai_date != derived_date:
-                logger.warning("出生日期不一致: %s AI='%s' 身份证号='%s'，以身份证号为准", name, ai_date, derived_date)
-                party["出生日期"] = derived_date
 
-            # 从身份证号码推导性别（第17位：奇数=男，偶数=女）
-            derived_gender = "男" if int(id_num[16]) % 2 == 1 else "女"
-            ai_gender = party.get("性别", "").strip()
-            if not ai_gender:
+            # 从身份证号码推导性别（第17位：奇数=男，偶数=女），仅当AI未提取时补全
+            if not party.get("性别", "").strip():
+                derived_gender = "男" if int(id_num[16]) % 2 == 1 else "女"
                 party["性别"] = derived_gender
                 logger.info("补全性别: %s → %s（从身份证号推导）", name, derived_gender)
-            elif ai_gender != derived_gender:
-                logger.warning("性别不一致: %s AI='%s' 身份证号='%s'，以身份证号为准", name, ai_gender, derived_gender)
-                party["性别"] = derived_gender
 
             # 民族为空时默认汉族
             if not party.get("民族", "").strip():

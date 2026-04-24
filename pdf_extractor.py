@@ -5,30 +5,28 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pdfplumber
+import yaml
 
 logger = logging.getLogger(__name__)
 
+# 加载 OCR 配置
+_settings_path = Path(__file__).parent / "settings.yaml"
+with open(_settings_path, "r", encoding="utf-8") as f:
+    _settings = yaml.safe_load(f)
 
-def extract_text_from_single_pdf(pdf_path: Path) -> str:
-    """从单个PDF提取文本。文本型PDF直接提取，图片型PDF走OCR兜底。"""
-    pdf_path = Path(pdf_path)
-    if not pdf_path.exists():
-        raise FileNotFoundError(f"{pdf_path} 不存在")
+_ocr_config = _settings.get("ocr", {})
+_ocr_provider = _ocr_config.get("provider", "ocrmypdf")
+_ocr_force = _ocr_config.get("force", False)
 
-    # 1. 尝试文本型PDF
-    text_pages = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                text_pages.append(text)
 
-    if text_pages:
-        logger.info("文本型PDF，直接提取成功: %s", pdf_path.name)
-        return "\n\n".join(text_pages)
+def _ocr_with_zhipu(pdf_path: Path) -> str:
+    """使用智谱GLM-4V进行OCR。"""
+    from zhipu_ocr import ocr_pdf
+    return ocr_pdf(pdf_path)
 
-    # 2. 图片型PDF，OCR兜底
-    logger.info("检测到图片型PDF，启用OCR: %s", pdf_path.name)
+
+def _ocr_with_ocrmypdf(pdf_path: Path) -> str:
+    """使用ocrmypdf（Tesseract）进行OCR。"""
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp_path = tmp.name
 
@@ -56,6 +54,38 @@ def extract_text_from_single_pdf(pdf_path: Path) -> str:
             return "\n\n".join(ocr_pages)
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+
+
+def extract_text_from_single_pdf(pdf_path: Path) -> str:
+    """从单个PDF提取文本。force=True 时所有PDF走OCR，否则文本型PDF直接提取。"""
+    pdf_path = Path(pdf_path)
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"{pdf_path} 不存在")
+
+    # force 模式：所有PDF都走OCR
+    if _ocr_force and _ocr_provider == "zhipu":
+        logger.info("强制OCR模式: %s", pdf_path.name)
+        return _ocr_with_zhipu(pdf_path)
+
+    # 1. 尝试文本型PDF
+    text_pages = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                text_pages.append(text)
+
+    if text_pages:
+        logger.info("文本型PDF，直接提取成功: %s", pdf_path.name)
+        return "\n\n".join(text_pages)
+
+    # 2. 图片型PDF，OCR兜底
+    logger.info("检测到图片型PDF，使用 %s OCR: %s", _ocr_provider, pdf_path.name)
+
+    if _ocr_provider == "zhipu":
+        return _ocr_with_zhipu(pdf_path)
+    else:
+        return _ocr_with_ocrmypdf(pdf_path)
 
 
 def extract_all_pdfs(folder_path: Path, max_workers: int = 2) -> dict[str, str]:
