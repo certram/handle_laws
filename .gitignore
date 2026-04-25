@@ -1,8 +1,9 @@
-settings.yaml
-outputs/
-original_files/
 __pycache__/
 .processed.json
 *.pyc
 *.png
 .DS_Store
+outputs/*
+!outputs/.gitkeep
+original_files/*
+!original_files/.gitkeep

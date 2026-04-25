@@ -263,9 +263,31 @@ def extract_property_clues(all_texts: dict[str, str]) -> list:
     """
     从所有PDF文本中精准提取财产线索列表（主提取为空时的二次提取）。
 
+    优先从保函/担保函中提取（财产线索通常更清晰），如果保函中提取不到，
+    再从全部文档中提取。
+
     返回财产线索列表，每个元素包含：类型、详细内容、归属地。
     """
+    # 优先从保函/担保函中提取
+    guarantee_text = ""
+    for filename, text in all_texts.items():
+        if "担保函" in filename or "保函" in filename:
+            guarantee_text += f"\n\n===文件: {filename}===\n{text}"
+
+    if guarantee_text:
+        logger.info("优先从保函中提取财产线索")
+        clues = _do_extract_property_clues(guarantee_text)
+        if clues:
+            return clues
+        logger.warning("保函中未提取到财产线索，回退到全部文档")
+
+    # 回退：从全部文档提取
     documents_text = _build_documents_text(all_texts)
+    return _do_extract_property_clues(documents_text)
+
+
+def _do_extract_property_clues(documents_text: str) -> list:
+    """执行财产线索提取。"""
     resp = client.chat.completions.create(
         model=MODEL_NAME,
         temperature=0,
@@ -274,7 +296,7 @@ def extract_property_clues(all_texts: dict[str, str]) -> list:
                 "role": "system",
                 "content": (
                     "你是一个信息提取助手。用户会给多份法律文书文本，你需要从中提取所有财产线索。\n"
-                    "财产线索通常出现在「财产保全申请书」「财产线索表」「财产线索」等文件中。\n"
+                    "财产线索通常出现在「财产保全申请书」「财产线索表」「财产线索」「保函/担保函」等文件中。\n"
                     "每条线索包含：\n"
                     "- 类型：银行账户、房产、股权、支付宝、财付通、车辆等\n"
                     "- 详细内容：完整的线索描述（包含开户行、账号、地址等所有细节）\n"
@@ -292,13 +314,13 @@ def extract_property_clues(all_texts: dict[str, str]) -> list:
     )
 
     result_str = resp.choices[0].message.content.strip()
-    logger.info("二次提取财产线索: '%s'", result_str[:200])
+    logger.info("财产线索提取结果: '%s'", result_str[:200])
     try:
         clues = _parse_json_response(result_str)
         if isinstance(clues, list):
             return clues
-        logger.warning("二次提取财产线索返回非数组类型: %s", type(clues))
+        logger.warning("财产线索提取返回非数组类型: %s", type(clues))
         return []
     except Exception as e:
-        logger.warning("二次提取财产线索解析失败: %s", e)
+        logger.warning("财产线索解析失败: %s", e)
         return []

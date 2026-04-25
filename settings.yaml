@@ -1,0 +1,51 @@
+# handle_laws 配置文件
+
+# AI 模型配置（列表，used: true 的模型会被使用，只能有一个）
+models:
+  # - name: "qwen-long"
+  #   api_key: "your-qwen-api-key"
+  #   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  #   model: "qwen-long"
+  #   used: true
+
+  - name: "deepseek"
+    api_key: "sk-578e4b47f6c2476e871ae9fa5a2e8feb"
+    base_url: "https://api.deepseek.com/v1"
+    model: "deepseek-chat"
+    used: true
+
+  # - name: "glm"
+  #   api_key: "your-zhipu-api-key"
+  #   base_url: "https://open.bigmodel.cn/api/paas/v4/"
+  #   model: "glm-4-flash"
+  #   used: false
+
+  # - name: "minimax-m2.7"
+  #   api_key: "your-minimax-api-key"
+  #   base_url: "https://api.minimax.chat/v1"
+  #   model: "MiniMax-M2.7"
+  #   used: false
+
+  # - name: "moonshot"
+  #   api_key: "你的Moonshot API Key"
+  #   base_url: "https://api.moonshot.cn/v1"
+  #   model: "moonshot-v1-128k"
+  #   used: false
+
+# OCR 配置（图片型PDF的文字识别）
+ocr:
+  provider: "zhipu"              # "zhipu" 使用智谱GLM-OCR，"ocrmypdf" 使用本地Tesseract
+  api_key: "d3cab794a0fb4986bdd33d5e203c5a71.qIPt7bwFkF1PRJ05"                    # 智谱API Key（provider为zhipu时必填）
+  model: "glm-ocr"              # 智谱OCR模型：glm-ocr（专用OCR）、glm-4v-flash（免费视觉）、glm-4v-plus
+  force: true                   # true=所有PDF都走OCR，false=文本型PDF直接提取，仅图片型走OCR
+
+# 文件命名配置
+naming:
+  civil_first: "26民初"
+
+# 删除配置：匹配的协助执行通知书将被删除
+# 支持的关键词：支付宝、财付通、银行、房产、股权、车辆
+delete:
+  - "支付宝"
+  - "财付通"
+  - "银行"
